@@ -134,7 +134,7 @@ public class Group6PL extends JFrame {
     
         private void buildAdminUI() {
             setLayout(new BorderLayout());
-            getContentPane().setBackground(Color.decode("#FFF9DB")); // soft yellow
+            getContentPane().setBackground(Color.decode("#FFF9DB"));
     
             // === Header ===
             JPanel header = new JPanel(new FlowLayout(FlowLayout.CENTER));
@@ -164,7 +164,10 @@ public class Group6PL extends JFrame {
             tableList = new JComboBox<>(new String[]{"users", "accounts", "transfers", "requests", "admin_logs"});
             JButton btnViewTable = new JButton("View Table");
             JButton btnAddUser = new JButton("Add User");
+            JButton btnCreateAccount = new JButton("Create Account"); // NEW BUTTON
+            JButton btnBackup = new JButton("Backup DB");
     
+            // View any table
             btnViewTable.addActionListener(e -> {
                 String table = (String) tableList.getSelectedItem();
                 ResultSet rs = business.viewAnyTable(table);
@@ -197,6 +200,7 @@ public class Group6PL extends JFrame {
                 }
             });
     
+            // Add user
             btnAddUser.addActionListener(e -> {
                 String u = JOptionPane.showInputDialog(this, "Username:");
                 String p = JOptionPane.showInputDialog(this, "Password:");
@@ -205,9 +209,34 @@ public class Group6PL extends JFrame {
                 JOptionPane.showMessageDialog(this, ok ? "✅ User added." : "❌ Add failed.");
             });
     
+            // Create account (NEW)
+            btnCreateAccount.addActionListener(e -> {
+                try {
+                    String userStr = JOptionPane.showInputDialog(this, "Enter User ID:");
+                    if (userStr == null) return;
+                    int userId = Integer.parseInt(userStr.trim());
+    
+                    String type = JOptionPane.showInputDialog(this, "Enter Account Type:");
+                    if (type == null || type.isEmpty()) return;
+    
+                    String balanceStr = JOptionPane.showInputDialog(this, "Enter Initial Balance:");
+                    if (balanceStr == null) return;
+                    double balance = Double.parseDouble(balanceStr.trim());
+    
+                    boolean ok = business.createAccountForUser(userId, type, balance);
+                    JOptionPane.showMessageDialog(this, ok ? "✅ Account created." : "❌ Account creation failed.");
+                } catch (Exception ex) {
+                    JOptionPane.showMessageDialog(this, "❌ Invalid input.");
+                }
+            });
+
+            btnBackup.addActionListener(e -> business.backupDatabase());
+    
             center.add(tableList);
             center.add(btnViewTable);
             center.add(btnAddUser);
+            center.add(btnCreateAccount); // ADD TO UI
+            center.add(btnBackup);
     
             add(center, BorderLayout.CENTER);
     
@@ -217,6 +246,7 @@ public class Group6PL extends JFrame {
             setVisible(true);
         }
     }
+    
     
 
     // ================= CLIENT MENU ===================
@@ -284,7 +314,7 @@ public class Group6PL extends JFrame {
                         return;
                     double amt = Double.parseDouble(amtStr.trim());
 
-                    boolean ok = business.transferBetweenAccounts(from, to, amt);
+                    boolean ok = business.transferBetweenAccounts(username, from, to, amt);
                     JOptionPane.showMessageDialog(this, ok ? "✅ Transfer successful!" : "❌ Transfer failed.");
 
                 } catch (Exception ex) {
@@ -332,6 +362,7 @@ public class Group6PL extends JFrame {
 
             setDefaultCloseOperation(EXIT_ON_CLOSE);
             pack();
+            setLocationRelativeTo(null);
             setVisible(true);
         }
     }

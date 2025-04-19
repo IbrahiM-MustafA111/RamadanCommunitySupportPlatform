@@ -36,9 +36,15 @@ public class Group6BL {
     }
 
     // Perform credit transfer between accounts
-    public boolean transferBetweenAccounts(int fromAccId, int toAccId, double amount) {
+    public boolean transferBetweenAccounts(String username, int fromAccId, int toAccId, double amount) {
         if (amount <= 0) {
             System.out.println("Amount must be greater than 0.");
+            return false;
+        }
+
+        // Check account ownership
+        if (!dataLayer.doesUserOwnAccount(username, fromAccId)) {
+            System.out.println("Unauthorized transfer attempt from non-owned account.");
             return false;
         }
         return dataLayer.transferCredits(fromAccId, toAccId, amount);
@@ -51,6 +57,8 @@ public class Group6BL {
 
     // NEW: View personal client info (accounts, requests, transfers)
     public String getClientDetails(String username) {
+        System.out.println("Viewing info for: " + username);
+
         return dataLayer.fetchClientInfo(username);
     }
 
@@ -58,4 +66,18 @@ public class Group6BL {
     public boolean submitAidRequest(String username, double amount, String reason) {
         return dataLayer.insertAidRequest(username, amount, reason);
     }
+
+    // NEW: Admin creates an account for a user
+    public boolean createAccountForUser(int userId, String accountType, double balance) {
+        if (accountType == null || accountType.isEmpty() || balance < 0) {
+            System.out.println("Invalid account type or balance.");
+            return false;
+        }
+        return dataLayer.createAccount(userId, accountType, balance);
+    }
+
+    public void backupDatabase() {
+        dataLayer.performBackup();
+    }
+
 }

@@ -1,25 +1,42 @@
 // Group6DL.java - Data Layer for ISTE-330 Group 6
 // Author: Ibraheem Mustafa
-
-import java.sql.*;
-import java.security.MessageDigest;
+import java.util.Date;
 import java.math.BigInteger;
+import java.security.MessageDigest;
+import java.sql.CallableStatement;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.text.SimpleDateFormat;
+
+import javax.swing.JOptionPane;
+
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 
 public class Group6DL {
 
-    private Connection conn;
+    private static HikariDataSource dataSource;
 
-    // Connect to the database
+    // Initialize the HikariCP connection pool
     public boolean connectDB() {
         try {
-            String url = "jdbc:mariadb://localhost:3308/group6db";
-            String user = "root";
-            String password = "mariadb"; // Prompt if needed
+            HikariConfig config = new HikariConfig();
+            config.setJdbcUrl("jdbc:mariadb://localhost:3308/group6db");
+            config.setUsername("root");
+            config.setPassword("mariadb");
+            config.setDriverClassName("org.mariadb.jdbc.Driver");
+            config.setMaximumPoolSize(10);
+            config.setConnectionTimeout(30000);
 
-            Class.forName("org.mariadb.jdbc.Driver");
-            conn = DriverManager.getConnection(url, user, password);
+            // Statement pooling enhancements
+            config.addDataSourceProperty("cachePrepStmts", "true");
+            config.addDataSourceProperty("prepStmtCacheSize", "50");
+            config.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
 
-            System.out.println("Connected to group6db!");
+            dataSource = new HikariDataSource(config);
+            System.out.println("Connected to group6db using HikariCP!");
             return true;
 
         } catch (Exception e) {
@@ -28,16 +45,21 @@ public class Group6DL {
         }
     }
 
-    // Disconnect from the database
+    // Disconnect the pool
     public void disconnectDB() {
         try {
-            if (conn != null && !conn.isClosed()) {
-                conn.close();
+            if (dataSource != null && !dataSource.isClosed()) {
+                dataSource.close();
                 System.out.println("Disconnected from group6db.");
             }
         } catch (Exception e) {
             System.out.println("Disconnection error: " + e.getMessage());
         }
+    }
+
+    // Helper to get connection from pool
+    private Connection getConnection() throws SQLException {
+        return dataSource.getConnection();
     }
 
     // Hash password using SHA-1
@@ -52,25 +74,21 @@ public class Group6DL {
         }
     }
 
-    // Validate login and return role if successful, else null
+    // Validate login and return role if successful
     public String login(String username, String rawPassword) {
         String role = null;
         String hashed = hashPassword(rawPassword);
 
-        try {
-            PreparedStatement stmt = conn.prepareStatement(
-                "SELECT role FROM users WHERE username = ? AND password = ?");
+        String sql = "SELECT role FROM users WHERE username = ? AND password = ?";
+
+        try (Connection conn = getConnection(); PreparedStatement stmt = conn.prepareStatement(sql)) {
             stmt.setString(1, username);
             stmt.setString(2, hashed);
-
             ResultSet rs = stmt.executeQuery();
+
             if (rs.next()) {
                 role = rs.getString("role");
             }
-
-            rs.close();
-            stmt.close();
-
         } catch (SQLException e) {
             System.out.println("Login failed: " + e.getMessage());
         }
@@ -80,26 +98,37 @@ public class Group6DL {
 
     // Transfer credits using stored procedure
     public boolean transferCredits(int fromAccountId, int toAccountId, double amount) {
-        try {
-            CallableStatement stmt = conn.prepareCall(
-                "{CALL transfer_credits_by_account(?, ?, ?)}");
+        String call = "{CALL transfer_credits_by_account(?, ?, ?)}";
+        try (Connection conn = getConnection(); CallableStatement stmt = conn.prepareCall(call)) {
             stmt.setInt(1, fromAccountId);
             stmt.setInt(2, toAccountId);
             stmt.setDouble(3, amount);
-
             stmt.execute();
-            stmt.close();
             return true;
-
         } catch (SQLException e) {
             System.out.println("Transfer failed: " + e.getMessage());
             return false;
         }
     }
 
-    // View any table (used by admin)
+    public boolean doesUserOwnAccount(String username, int accountId) {
+        String sql = "SELECT 1 FROM accounts a JOIN users u ON a.user_id = u.user_id WHERE u.username = ? AND a.account_id = ?";
+        try (Connection conn = getConnection(); PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, username);
+            stmt.setInt(2, accountId);
+            ResultSet rs = stmt.executeQuery();
+            return rs.next();
+        } catch (SQLException e) {
+            System.out.println("Ownership check failed: " + e.getMessage());
+            return false;
+        }
+    }
+    
+
+    // View any table (admin only)
     public ResultSet viewTable(String tableName) {
         try {
+            Connection conn = getConnection();
             CallableStatement stmt = conn.prepareCall("{CALL show_table(?)}");
             stmt.setString(1, tableName);
             stmt.execute();
@@ -110,93 +139,83 @@ public class Group6DL {
         }
     }
 
-    // Used to create a new user (admin use)
+    // Add a new user (admin only)
     public boolean addUser(String username, String password, String role) {
-        try {
-            String hashed = hashPassword(password);
-            PreparedStatement stmt = conn.prepareStatement(
-                "INSERT INTO users (username, password, role) VALUES (?, ?, ?)");
+        String sql = "INSERT INTO users (username, password, role) VALUES (?, ?, ?)";
+        String hashed = hashPassword(password);
+
+        try (Connection conn = getConnection(); PreparedStatement stmt = conn.prepareStatement(sql)) {
             stmt.setString(1, username);
             stmt.setString(2, hashed);
             stmt.setString(3, role);
-
             int result = stmt.executeUpdate();
-            stmt.close();
             return result > 0;
-
         } catch (SQLException e) {
             System.out.println("Error adding user: " + e.getMessage());
             return false;
         }
     }
 
-    // NEW: Fetch all info (accounts, requests, transfers) for a client
+    // Fetch all client info (accounts, requests, transfers)
     public String fetchClientInfo(String username) {
         StringBuilder sb = new StringBuilder();
+        String userQuery = "SELECT user_id FROM users WHERE username = ?";
+        String accountQuery = "SELECT account_id, account_type, balance FROM accounts WHERE user_id = ?";
+        String requestQuery = "SELECT amount, reason, status, request_date FROM requests WHERE user_id = ?";
+        String transferQuery = "SELECT transfer_id, from_account, to_account, amount, timestamp FROM transfers " +
+                "WHERE from_account IN (SELECT account_id FROM accounts WHERE user_id = ?) " +
+                "OR to_account IN (SELECT account_id FROM accounts WHERE user_id = ?)";
 
-        try {
-            // Step 1: Get user_id
-            PreparedStatement userStmt = conn.prepareStatement("SELECT user_id FROM users WHERE username = ?");
+        try (Connection conn = getConnection();
+                PreparedStatement userStmt = conn.prepareStatement(userQuery)) {
+
             userStmt.setString(1, username);
             ResultSet userRs = userStmt.executeQuery();
 
-            if (!userRs.next()) {
+            if (!userRs.next())
                 return "User not found.";
-            }
+
             int userId = userRs.getInt("user_id");
-            userRs.close();
-            userStmt.close();
 
-            // Step 2: Accounts
+            // Accounts
             sb.append("=== Accounts ===\n");
-            PreparedStatement accStmt = conn.prepareStatement(
-                "SELECT account_id, account_type, balance FROM accounts WHERE user_id = ?");
-            accStmt.setInt(1, userId);
-            ResultSet accRs = accStmt.executeQuery();
-
-            while (accRs.next()) {
-                sb.append("Account ID: ").append(accRs.getInt("account_id"))
-                  .append(" | Type: ").append(accRs.getString("account_type"))
-                  .append(" | Balance: ").append(accRs.getDouble("balance")).append("\n");
+            try (PreparedStatement accStmt = conn.prepareStatement(accountQuery)) {
+                accStmt.setInt(1, userId);
+                ResultSet accRs = accStmt.executeQuery();
+                while (accRs.next()) {
+                    sb.append("Account ID: ").append(accRs.getInt("account_id"))
+                            .append(" | Type: ").append(accRs.getString("account_type"))
+                            .append(" | Balance: ").append(accRs.getDouble("balance")).append("\n");
+                }
             }
-            accRs.close();
-            accStmt.close();
 
-            // Step 3: Requests
+            // Requests
             sb.append("\n=== Requests ===\n");
-            PreparedStatement reqStmt = conn.prepareStatement(
-                "SELECT amount, reason, status, request_date FROM requests WHERE user_id = ?");
-            reqStmt.setInt(1, userId);
-            ResultSet reqRs = reqStmt.executeQuery();
-
-            while (reqRs.next()) {
-                sb.append("Amount: ").append(reqRs.getDouble("amount"))
-                  .append(" | Reason: ").append(reqRs.getString("reason"))
-                  .append(" | Status: ").append(reqRs.getString("status"))
-                  .append(" | Date: ").append(reqRs.getTimestamp("request_date")).append("\n");
+            try (PreparedStatement reqStmt = conn.prepareStatement(requestQuery)) {
+                reqStmt.setInt(1, userId);
+                ResultSet reqRs = reqStmt.executeQuery();
+                while (reqRs.next()) {
+                    sb.append("Amount: ").append(reqRs.getDouble("amount"))
+                            .append(" | Reason: ").append(reqRs.getString("reason"))
+                            .append(" | Status: ").append(reqRs.getString("status"))
+                            .append(" | Date: ").append(reqRs.getTimestamp("request_date")).append("\n");
+                }
             }
-            reqRs.close();
-            reqStmt.close();
 
-            // Step 4: Transfers
+            // Transfers
             sb.append("\n=== Transfers (as Sender or Receiver) ===\n");
-            PreparedStatement transStmt = conn.prepareStatement(
-                "SELECT transfer_id, from_account, to_account, amount, timestamp FROM transfers " +
-                "WHERE from_account IN (SELECT account_id FROM accounts WHERE user_id = ?) " +
-                "OR to_account IN (SELECT account_id FROM accounts WHERE user_id = ?)");
-            transStmt.setInt(1, userId);
-            transStmt.setInt(2, userId);
-            ResultSet transRs = transStmt.executeQuery();
-
-            while (transRs.next()) {
-                sb.append("Transfer ID: ").append(transRs.getInt("transfer_id"))
-                  .append(" | From: ").append(transRs.getInt("from_account"))
-                  .append(" | To: ").append(transRs.getInt("to_account"))
-                  .append(" | Amount: ").append(transRs.getDouble("amount"))
-                  .append(" | Date: ").append(transRs.getTimestamp("timestamp")).append("\n");
+            try (PreparedStatement transStmt = conn.prepareStatement(transferQuery)) {
+                transStmt.setInt(1, userId);
+                transStmt.setInt(2, userId);
+                ResultSet transRs = transStmt.executeQuery();
+                while (transRs.next()) {
+                    sb.append("Transfer ID: ").append(transRs.getInt("transfer_id"))
+                            .append(" | From: ").append(transRs.getInt("from_account"))
+                            .append(" | To: ").append(transRs.getInt("to_account"))
+                            .append(" | Amount: ").append(transRs.getDouble("amount"))
+                            .append(" | Date: ").append(transRs.getTimestamp("timestamp")).append("\n");
+                }
             }
-            transRs.close();
-            transStmt.close();
 
         } catch (SQLException e) {
             return "❌ Error fetching info: " + e.getMessage();
@@ -205,33 +224,67 @@ public class Group6DL {
         return sb.toString();
     }
 
-    // NEW: Insert aid request
+    // Insert aid request
     public boolean insertAidRequest(String username, double amount, String reason) {
-        try {
-            // Get user ID
-            PreparedStatement userStmt = conn.prepareStatement("SELECT user_id FROM users WHERE username = ?");
+        String findUser = "SELECT user_id FROM users WHERE username = ?";
+        String insertRequest = "INSERT INTO requests (user_id, amount, reason, status) VALUES (?, ?, ?, 'pending')";
+
+        try (Connection conn = getConnection();
+                PreparedStatement userStmt = conn.prepareStatement(findUser)) {
+
             userStmt.setString(1, username);
             ResultSet rs = userStmt.executeQuery();
 
-            if (!rs.next()) return false;
+            if (!rs.next())
+                return false;
             int userId = rs.getInt("user_id");
-            rs.close();
-            userStmt.close();
 
-            // Insert request
-            PreparedStatement insertStmt = conn.prepareStatement(
-                "INSERT INTO requests (user_id, amount, reason, status) VALUES (?, ?, ?, 'pending')");
-            insertStmt.setInt(1, userId);
-            insertStmt.setDouble(2, amount);
-            insertStmt.setString(3, reason);
-
-            int result = insertStmt.executeUpdate();
-            insertStmt.close();
-            return result > 0;
+            try (PreparedStatement insertStmt = conn.prepareStatement(insertRequest)) {
+                insertStmt.setInt(1, userId);
+                insertStmt.setDouble(2, amount);
+                insertStmt.setString(3, reason);
+                return insertStmt.executeUpdate() > 0;
+            }
 
         } catch (SQLException e) {
             System.out.println("Aid request insert failed: " + e.getMessage());
             return false;
         }
     }
+
+    // Create a new account for a user (admin only)
+    public boolean createAccount(int userId, String accountType, double balance) {
+        String sql = "INSERT INTO accounts (user_id, account_type, balance) VALUES (?, ?, ?)";
+
+        try (Connection conn = getConnection(); PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setInt(1, userId);
+            stmt.setString(2, accountType);
+            stmt.setDouble(3, balance);
+            return stmt.executeUpdate() > 0;
+        } catch (SQLException e) {
+            System.out.println("Error creating account: " + e.getMessage());
+            return false;
+        }
+    }
+
+    public void performBackup() {
+        try {
+            String timestamp = new SimpleDateFormat("dd_MM_yyyy_HH_mm_ss").format(new Date());
+            String backupFile = "group6db_BACKUP_" + timestamp + ".sql";
+            String dumpPath = "\"C:\\Program Files\\MariaDB 11.4\\bin\\mysqldump.exe\"";
+            String command = dumpPath + " -u root -pmariadb group6db -P 3308 -h localhost -r " + backupFile;
+
+            Process runtimeProcess = Runtime.getRuntime().exec(command);
+            int processComplete = runtimeProcess.waitFor();
+
+            if (processComplete == 0) {
+                JOptionPane.showMessageDialog(null, "✅ Backup successful: " + backupFile);
+            } else {
+                JOptionPane.showMessageDialog(null, "❌ Backup failed. Exit code: " + processComplete);
+            }
+        } catch (Exception e) {
+            JOptionPane.showMessageDialog(null, "❌ Error during backup: " + e.getMessage());
+        }
+    }
+
 }
